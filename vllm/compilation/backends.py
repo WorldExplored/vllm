@@ -485,7 +485,8 @@ class VllmBackend:
             factors = []
             # 0. factors come from the env, for example, The values of
             # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            env_hash = envs.compute_hash()
+            from vllm.config.utils import hash_factors
+            env_hash = hash_factors(envs.compile_factors())
             factors.append(env_hash)
 
             # 1. factors come from the vllm_config (it mainly summarizes how the
@@ -562,7 +563,8 @@ class VllmBackend:
             vllm_config_hash = "<unavailable>"
 
         # Derive hashes for logging and cache key.
-        env_hash = envs.compute_hash()
+        from vllm.config.utils import hash_factors as _hash_factors
+        env_hash = _hash_factors(envs.compile_factors())
         config_hash = vllm_config_hash if vllm_config_hash != "<unavailable>" \
             else vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
@@ -586,14 +588,34 @@ class VllmBackend:
         ).hexdigest()[:10]
 
         logger.info(
-            "torch.compile cache factors: env=%s cfg=%s code=%s comp=%s key=%s dir=%s",
+            "torch.compile cache factors: env=%s cfg=%s comp=%s dir=%s",
             env_hash,
             config_hash,
-            code_hash,
             compiler_hash,
-            summary_hash_key,
             local_cache_dir,
         )
+        logger.debug("code hash=%s summary_key=%s", code_hash, summary_hash_key)
+
+        # Persist only hash-relevant factors for post-run inspection.
+        try:
+            import json as _json
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            with open(meta_path, "w") as _f:
+                _f.write(
+                    _json.dumps(
+                        {
+                            "env": env_factors,  # raw factors used for env_hash
+                            "config_hash": config_hash,
+                            "code_hash": code_hash,
+                            "compiler_hash": compiler_hash,
+                            "summary_key": summary_hash_key,
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    ))
+        except Exception:
+            # Best-effort; do not fail compilation on metadata write issues.
+            pass
         logger.debug(
             "Compile env factors (raw):\n%s\nVllm config hash: %s",
             pprint.pformat(env_factors, width=120),
