@@ -1472,80 +1472,13 @@ def set_vllm_use_v1(use_v1: bool):
 
 def compile_factors() -> dict[str, object]:
     """
-    Return compile-relevant env factors in raw form.
-
-    Simple opt-out: include all known envs except a concise set that clearly
-    do not affect compiled graph selection or kernels.
+    Return raw env factors for compile hashing using the legacy opt-out
+    strategy: include all known env vars except a minimal set that clearly
+    does not affect compiled graph structure or kernel routing.
     """
 
-    ignored_factors = {
-        # Logging/diagnostics
-        "VLLM_CONFIGURE_LOGGING",
-        "VLLM_LOGGING_CONFIG_PATH",
-        "VLLM_LOGGING_LEVEL",
-        "VLLM_LOGGING_STREAM",
-        "VLLM_LOGGING_PREFIX",
-        "VLLM_LOG_STATS_INTERVAL",
-        "VLLM_TRACE_FUNCTION",
-        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
-        # Usage/telemetry
-        "VLLM_USAGE_STATS_SERVER",
-        "VLLM_NO_USAGE_STATS",
-        "VLLM_DO_NOT_TRACK",
-        "VLLM_USAGE_SOURCE",
-        # Service/networking/ports
-        "VLLM_HOST_IP",
-        "VLLM_PORT",
-        "VLLM_RPC_BASE_PATH",
-        "VLLM_LOOPBACK_IP",
-        # Paths/roots
-        "VLLM_CACHE_ROOT",
-        "VLLM_CONFIG_ROOT",
-        "VLLM_ASSETS_CACHE",
-        "VLLM_XLA_CACHE_PATH",
-        "VLLM_LORA_RESOLVER_CACHE_DIR",
-        "VLLM_CUDART_SO_PATH",
-        "VLLM_NCCL_SO_PATH",
-        "LD_LIBRARY_PATH",
-        # Timeouts and perf logging knobs (not compile-time structure)
-        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
-        "VLLM_RPC_TIMEOUT",
-        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
-        "VLLM_IMAGE_FETCH_TIMEOUT",
-        "VLLM_VIDEO_FETCH_TIMEOUT",
-        "VLLM_AUDIO_FETCH_TIMEOUT",
-        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
-        "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS",
-        # DP runtime topology (does not change compiled module structure)
-        "VLLM_DP_RANK",
-        "VLLM_DP_RANK_LOCAL",
-        "VLLM_DP_SIZE",
-        "VLLM_DP_MASTER_IP",
-        "VLLM_DP_MASTER_PORT",
-        "LOCAL_RANK",
-        "CUDA_VISIBLE_DEVICES",
-        # Secrets/keys
-        "VLLM_API_KEY",
-        "S3_ACCESS_KEY_ID",
-        "S3_SECRET_ACCESS_KEY",
-        "S3_ENDPOINT_URL",
-        # Dev/server flags unrelated to compilation
-        "VLLM_SERVER_DEV_MODE",
-        # Additional runtime-only toggles not tied to codegen/kernels
-        "VLLM_LOG_BATCHSIZE_INTERVAL",
-        "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
-        "VLLM_PROCESS_NAME_PREFIX",
-        "VLLM_ENABLE_RESPONSES_API_STORE",
-        "VLLM_SLEEP_WHEN_IDLE",
-        "VLLM_MSGPACK_ZERO_COPY_THRESHOLD",
-        "VLLM_XGRAMMAR_CACHE_MB",
-        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-        "VLLM_DEEPEP_BUFFER_SIZE_MB",
-        "VLLM_DBO_COMM_SMS",
-        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS",
-        "VLLM_PATTERN_MATCH_DEBUG",
-    }
+    ignored_factors = {"VLLM_LOGGING_LEVEL", "VLLM_TORCH_PROFILER_DIR",
+                       "VLLM_PORT"}
 
     from vllm.config.utils import normalize_value
 
