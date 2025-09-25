@@ -550,25 +550,21 @@ class VllmBackend:
         self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
                                                self.prefix)
 
-        # Persist normalized factors and log cache key components for
-        # visibility, and save into
-        # the cache file for post-run inspection.
+        # Compute and persist compile factors and cache key components once.
         try:
-            # Persist only the env factors that actually contribute to the hash.
             env_factors = envs.compile_factors()
         except Exception:
             env_factors = {}
 
-        # Persist only the top-level overall config hash; avoid repeating
-        # sub-config hashes or raw values. This is sufficient for debugging.
         try:
-            config_factors = {"vllm_config_hash": vllm_config.compute_hash()}
+            vllm_config_hash = vllm_config.compute_hash()
         except Exception:
-            config_factors = {}
+            vllm_config_hash = "<unavailable>"
 
-        # Always compute cache key components for logging/persistence.
+        # Derive hashes for logging and cache key.
         env_hash = envs.compute_hash()
-        config_hash = vllm_config.compute_hash()
+        config_hash = vllm_config_hash if vllm_config_hash != "<unavailable>" \
+            else vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
 
         forward_code_files = list(sorted(self.compilation_config.traced_files))
@@ -582,8 +578,6 @@ class VllmBackend:
                 with open(filepath) as f:
                     hash_content.append(f.read())
             except Exception:
-                # If a traced file cannot be read, skip its contents but keep
-                # its path in the hash input for stability.
                 continue
         import hashlib as _hashlib
         code_hash = _hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
@@ -592,8 +586,7 @@ class VllmBackend:
         ).hexdigest()[:10]
 
         logger.info(
-            "torch.compile cache factors: "
-            "env=%s cfg=%s code=%s comp=%s key=%s dir=%s",
+            "torch.compile cache factors: env=%s cfg=%s code=%s comp=%s key=%s dir=%s",
             env_hash,
             config_hash,
             code_hash,
@@ -602,10 +595,9 @@ class VllmBackend:
             local_cache_dir,
         )
         logger.debug(
-            "Normalized env factors:\n%s\n"
-            "Normalized vLLM config factors:\n%s",
+            "Compile env factors (raw):\n%s\nVllm config hash: %s",
             pprint.pformat(env_factors, width=120),
-            pprint.pformat(config_factors, width=120),
+            config_hash,
         )
 
         # when dynamo calls the backend, it means the bytecode
