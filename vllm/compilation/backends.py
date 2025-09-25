@@ -497,7 +497,6 @@ class VllmBackend:
             #    it mainly summarizes how the model is used in forward pass)
             forward_code_files = list(
                 sorted(self.compilation_config.traced_files))
-            self.compilation_config.traced_files.clear()
             logger.debug(
                 "Traced files (to be considered for compilation cache):\n%s",
                 "\n".join(forward_code_files))
@@ -511,8 +510,8 @@ class VllmBackend:
                 with open(filepath) as f:
                     hash_content.append(f.read())
             import hashlib
-            code_hash = hashlib.md5("\n".join(hash_content).encode(),
-                                    usedforsecurity=False).hexdigest()
+            code_hash = hashlib.sha256("\n".join(hash_content).encode()
+                                    ).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -550,6 +549,64 @@ class VllmBackend:
 
         self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
                                                self.prefix)
+
+        # Persist normalized factors and log cache key components for
+        # visibility, and save into
+        # the cache file for post-run inspection.
+        try:
+            # Persist only the env factors that actually contribute to the hash.
+            env_factors = envs.compile_factors()
+        except Exception:
+            env_factors = {}
+
+        # Persist only the top-level overall config hash; avoid repeating
+        # sub-config hashes or raw values. This is sufficient for debugging.
+        try:
+            config_factors = {"vllm_config_hash": vllm_config.compute_hash()}
+        except Exception:
+            config_factors = {}
+
+        # Always compute cache key components for logging/persistence.
+        env_hash = envs.compute_hash()
+        config_hash = vllm_config.compute_hash()
+        compiler_hash = self.compiler_manager.compute_hash(vllm_config)
+
+        forward_code_files = list(sorted(self.compilation_config.traced_files))
+        self.compilation_config.traced_files.clear()
+        hash_content = []
+        for filepath in forward_code_files:
+            hash_content.append(filepath)
+            if filepath == "<string>":
+                continue
+            try:
+                with open(filepath) as f:
+                    hash_content.append(f.read())
+            except Exception:
+                # If a traced file cannot be read, skip its contents but keep
+                # its path in the hash input for stability.
+                continue
+        import hashlib as _hashlib
+        code_hash = _hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        summary_hash_key = _hashlib.sha256(
+            str([env_hash, config_hash, code_hash, compiler_hash]).encode()
+        ).hexdigest()[:10]
+
+        logger.info(
+            "torch.compile cache factors: "
+            "env=%s cfg=%s code=%s comp=%s key=%s dir=%s",
+            env_hash,
+            config_hash,
+            code_hash,
+            compiler_hash,
+            summary_hash_key,
+            local_cache_dir,
+        )
+        logger.debug(
+            "Normalized env factors:\n%s\n"
+            "Normalized vLLM config factors:\n%s",
+            pprint.pformat(env_factors, width=120),
+            pprint.pformat(config_factors, width=120),
+        )
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
