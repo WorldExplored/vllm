@@ -1487,8 +1487,14 @@ def compile_factors() -> dict[str, object]:
         if factor in ignored_factors:
             continue
         try:
-            factors[factor] = normalize_value(getter())
+            raw = getter()
         except Exception:
-            # Skip values we cannot canonicalize deterministically.
+            # Do not drop the factor; mark retrieval failure deterministically.
+            factors[factor] = "<error:unavailable>"
             continue
+        try:
+            factors[factor] = normalize_value(raw)
+        except Exception:
+            # Preserve the factor with a stable placeholder to avoid under-hashing.
+            factors[factor] = f"<unserializable:{type(raw).__name__}>"
     return factors
