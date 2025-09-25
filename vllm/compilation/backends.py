@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import hashlib
+import json
 import dataclasses
 import os
 import pprint
@@ -510,7 +512,6 @@ class VllmBackend:
                     continue
                 with open(filepath) as f:
                     hash_content.append(f.read())
-            import hashlib
             code_hash = hashlib.sha256("\n".join(hash_content).encode()
                                     ).hexdigest()
             factors.append(code_hash)
@@ -581,9 +582,8 @@ class VllmBackend:
                     hash_content.append(f.read())
             except Exception:
                 continue
-        import hashlib as _hashlib
-        code_hash = _hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
-        summary_hash_key = _hashlib.sha256(
+        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        summary_hash_key = hashlib.sha256(
             str([env_hash, config_hash, code_hash, compiler_hash]).encode()
         ).hexdigest()[:10]
 
@@ -598,23 +598,21 @@ class VllmBackend:
 
         # Persist only hash-relevant factors for post-run inspection.
         try:
-            import json as _json
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
-            with open(meta_path, "w") as _f:
-                _f.write(
-                    _json.dumps(
-                        {
-                            "env": env_factors,  # raw factors used for env_hash
-                            "config_hash": config_hash,
-                            "code_hash": code_hash,
-                            "compiler_hash": compiler_hash,
-                            "summary_key": summary_hash_key,
-                        },
-                        indent=2,
-                        sort_keys=True,
-                    ))
+            with open(meta_path, "w") as f:
+                json.dump(
+                    {
+                        "env": env_factors,  # raw factors used for env_hash
+                        "config_hash": config_hash,
+                        "code_hash": code_hash,
+                        "compiler_hash": compiler_hash,
+                        "summary_key": summary_hash_key,
+                    },
+                    f,
+                    indent=2,
+                    sort_keys=True,
+                )
         except Exception:
-            # Best-effort; do not fail compilation on metadata write issues.
             pass
         logger.debug(
             "Compile env factors (raw):\n%s\nVllm config hash: %s",
