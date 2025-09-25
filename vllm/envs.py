@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import json
 import os
 import sys
@@ -119,12 +118,14 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH: int = 32
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
+    VLLM_USE_STANDALONE_COMPILE: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -180,14 +181,22 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
-    VLLM_GPT_OSS_USE_CONTAINER_TOOL: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
+    VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
+    VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DBO_COMM_SMS: int = 20
+    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
+    VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
+    VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
+    VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
+    VLLM_USE_NCCL_SYMM_MEM: bool = False
+    VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -256,6 +265,58 @@ def env_with_choices(
         return value
 
     return _get_validated_env
+
+
+def env_list_with_choices(
+        env_name: str,
+        default: list[str],
+        choices: Union[list[str], Callable[[], list[str]]],
+        case_sensitive: bool = True) -> Callable[[], list[str]]:
+    """
+    Create a lambda that validates environment variable 
+    containing comma-separated values against allowed choices
+    
+    Args:
+        env_name: Name of the environment variable
+        default: Default list of values if not set
+        choices: List of valid string options or callable that returns list
+        case_sensitive: Whether validation should be case sensitive
+        
+    Returns:
+        Lambda function for environment_variables
+        dict that returns list of strings
+    """
+
+    def _get_validated_env_list() -> list[str]:
+        value = os.getenv(env_name)
+        if value is None:
+            return default
+
+        # Split comma-separated values and strip whitespace
+        values = [v.strip() for v in value.split(",") if v.strip()]
+
+        if not values:
+            return default
+
+        # Resolve choices if it's a callable (for lazy loading)
+        actual_choices = choices() if callable(choices) else choices
+
+        # Validate each value
+        for val in values:
+            if not case_sensitive:
+                check_value = val.lower()
+                check_choices = [choice.lower() for choice in actual_choices]
+            else:
+                check_value = val
+                check_choices = actual_choices
+
+            if check_value not in check_choices:
+                raise ValueError(f"Invalid value '{val}' in {env_name}. "
+                                 f"Valid options: {actual_choices}.")
+
+        return values
+
+    return _get_validated_env_list
 
 
 def get_vllm_port() -> Optional[int]:
@@ -436,9 +497,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Feature flag to enable/disable Inductor standalone compile.
     # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # enabled by default.
+    # disabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
-    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
+    lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "0") == "1",
+
+    # Debug pattern matching inside custom passes.
+    # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
+    "VLLM_PATTERN_MATCH_DEBUG":
+    lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
@@ -529,7 +595,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "TORCH_SDPA": use torch.nn.MultiheadAttention
     # - "FLASH_ATTN": use FlashAttention
     # - "XFORMERS": use XFormers
-    # - "ROCM_FLASH": use ROCmFlashAttention
     # - "FLASHINFER": use flashinfer
     # - "FLASHMLA": use FlashMLA
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
@@ -947,6 +1012,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MLA_DISABLE":
     lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
 
+    # If set, vLLM will pick up the provided Flash Attention MLA
+    # max number splits for cuda graph decode
+    "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH":
+    lambda: int(os.getenv("VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
+                          "32")),
+
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
     # so that users can colocate other actors on the same GPUs as vLLM.
@@ -1301,15 +1372,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
-    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
-
-    # Allows vllm use container tool
-    "VLLM_GPT_OSS_USE_CONTAINER_TOOL":
-    lambda: bool(int(os.getenv("VLLM_GPT_OSS_USE_CONTAINER_TOOL", "0"))),
 
     # Allows harmony instructions to be injected on system messages
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS":
@@ -1319,6 +1386,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING":
     lambda: bool(int(os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0"))),
+
+    # Add optional nvtx scopes for profiling, disable to avoid overheads
+    "VLLM_NVTX_SCOPES_FOR_PROFILING":
+    lambda: bool(int(os.getenv("VLLM_NVTX_SCOPES_FOR_PROFILING", "0"))),
 
     # Represent block hashes in KV cache events as 64-bit integers instead of
     # raw bytes. Defaults to True for backward compatibility.
@@ -1330,6 +1401,43 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME":
     lambda: os.getenv("VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
                       "VLLM_OBJECT_STORAGE_SHM_BUFFER"),
+
+    # The size in MB of the buffers (NVL and RDMA) used by DeepEP
+    "VLLM_DEEPEP_BUFFER_SIZE_MB":
+    lambda: int(os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")),
+
+    # The number of SMs to allocate for communication kernels when running DBO
+    # the rest of the SMs on the device will be allocated to compute
+    "VLLM_DBO_COMM_SMS":
+    lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
+
+    # Valid values are container,code_interpreter,web_search_preview
+    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
+    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS":
+    env_list_with_choices("GPT_OSS_SYSTEM_TOOL_MCP_LABELS", [],
+                            ["container",
+                            "code_interpreter",
+                            "web_search_preview"]),
+
+    # Enable max_autotune & coordinate_descent_tuning in inductor_config
+    # to compile static shapes passed from compile_sizes in compilation_config
+    # If set to 1, enable max_autotune; By default, this is enabled (1)
+    "VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE", "1"))),
+    # If set to 1, enable coordinate_descent_tuning;
+    # By default, this is enabled (1)
+    "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
+        "1"))),
+
+    # Flag to enable NCCL symmetric memory allocation and registration
+    "VLLM_USE_NCCL_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))),
+
+    # NCCL header path
+    "VLLM_NCCL_INCLUDE_PATH":
+    lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1362,6 +1470,97 @@ def set_vllm_use_v1(use_v1: bool):
     os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
 
 
+def compile_factors() -> dict[str, object]:
+    """
+    Return compile-relevant env factors in raw form.
+
+    Simple opt-out: include all known envs except a concise set that clearly
+    do not affect compiled graph selection or kernels.
+    """
+
+    ignored_factors = {
+        # Logging/diagnostics
+        "VLLM_CONFIGURE_LOGGING",
+        "VLLM_LOGGING_CONFIG_PATH",
+        "VLLM_LOGGING_LEVEL",
+        "VLLM_LOGGING_STREAM",
+        "VLLM_LOGGING_PREFIX",
+        "VLLM_LOG_STATS_INTERVAL",
+        "VLLM_TRACE_FUNCTION",
+        "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        # Usage/telemetry
+        "VLLM_USAGE_STATS_SERVER",
+        "VLLM_NO_USAGE_STATS",
+        "VLLM_DO_NOT_TRACK",
+        "VLLM_USAGE_SOURCE",
+        # Service/networking/ports
+        "VLLM_HOST_IP",
+        "VLLM_PORT",
+        "VLLM_RPC_BASE_PATH",
+        "VLLM_LOOPBACK_IP",
+        # Paths/roots
+        "VLLM_CACHE_ROOT",
+        "VLLM_CONFIG_ROOT",
+        "VLLM_ASSETS_CACHE",
+        "VLLM_XLA_CACHE_PATH",
+        "VLLM_LORA_RESOLVER_CACHE_DIR",
+        "VLLM_CUDART_SO_PATH",
+        "VLLM_NCCL_SO_PATH",
+        "LD_LIBRARY_PATH",
+        # Timeouts and perf logging knobs (not compile-time structure)
+        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
+        "VLLM_RPC_TIMEOUT",
+        "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
+        "VLLM_IMAGE_FETCH_TIMEOUT",
+        "VLLM_VIDEO_FETCH_TIMEOUT",
+        "VLLM_AUDIO_FETCH_TIMEOUT",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS",
+        # DP runtime topology (does not change compiled module structure)
+        "VLLM_DP_RANK",
+        "VLLM_DP_RANK_LOCAL",
+        "VLLM_DP_SIZE",
+        "VLLM_DP_MASTER_IP",
+        "VLLM_DP_MASTER_PORT",
+        "LOCAL_RANK",
+        "CUDA_VISIBLE_DEVICES",
+        # Secrets/keys
+        "VLLM_API_KEY",
+        "S3_ACCESS_KEY_ID",
+        "S3_SECRET_ACCESS_KEY",
+        "S3_ENDPOINT_URL",
+        # Dev/server flags unrelated to compilation
+        "VLLM_SERVER_DEV_MODE",
+        # Additional runtime-only toggles not tied to codegen/kernels
+        "VLLM_LOG_BATCHSIZE_INTERVAL",
+        "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
+        "VLLM_PROCESS_NAME_PREFIX",
+        "VLLM_ENABLE_RESPONSES_API_STORE",
+        "VLLM_SLEEP_WHEN_IDLE",
+        "VLLM_MSGPACK_ZERO_COPY_THRESHOLD",
+        "VLLM_XGRAMMAR_CACHE_MB",
+        "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
+        "VLLM_DEEPEP_BUFFER_SIZE_MB",
+        "VLLM_DBO_COMM_SMS",
+        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
+        "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS",
+        "VLLM_PATTERN_MATCH_DEBUG",
+    }
+
+    from vllm.config.utils import normalize_value
+
+    factors: dict[str, object] = {}
+    for factor, getter in environment_variables.items():
+        if factor in ignored_factors:
+            continue
+        try:
+            factors[factor] = normalize_value(getter())
+        except Exception:
+            # Skip values we cannot canonicalize deterministically.
+            continue
+    return factors
+
+
 def compute_hash() -> str:
     """
     WARNING: Whenever a new key is added to this environment
@@ -1371,68 +1570,12 @@ def compute_hash() -> str:
     graphs, so it is included in the factors list. The env vars that
     affect the choice of different kernels or attention backends should
     also be included in the factors list.
+
+    Opt-out env hashing for torch.compile cache keys:
+    default-include all known vLLM environment variables, exclude a
+    tiny set that clearly do not affect the compiled graph.
     """
 
-    # The values of envs may affects the computation graph.
-    # TODO(DefTruth): hash all environment variables?
-    # for key in environment_variables:
-    #     factorize(key)
-    environment_variables_to_hash = [
-        "VLLM_PP_LAYER_PARTITION",
-        "VLLM_MLA_DISABLE",
-        "VLLM_USE_TRITON_FLASH_ATTN",
-        "VLLM_USE_TRITON_AWQ",
-        "VLLM_DP_RANK",
-        "VLLM_DP_SIZE",
-        "VLLM_USE_STANDALONE_COMPILE",
-        "VLLM_FUSED_MOE_CHUNK_SIZE",
-        "VLLM_FLASHINFER_MOE_BACKEND",
-        "VLLM_V1_USE_PREFILL_DECODE_ATTENTION",
-        "VLLM_USE_AITER_UNIFIED_ATTENTION",
-        "VLLM_ATTENTION_BACKEND",
-        "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_DISABLED_KERNELS",
-        "VLLM_USE_DEEP_GEMM",
-        "VLLM_USE_DEEP_GEMM_E8M0",
-        "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
-        "VLLM_USE_TRTLLM_FP4_GEMM",
-        "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
-        "VLLM_USE_FLASHINFER_MOE_FP8",
-        "VLLM_USE_FLASHINFER_MOE_FP4",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
-        "VLLM_USE_CUDNN_PREFILL",
-        "VLLM_USE_TRTLLM_ATTENTION",
-        "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
-        "VLLM_ROCM_USE_AITER",
-        "VLLM_ROCM_USE_AITER_PAGED_ATTN",
-        "VLLM_ROCM_USE_AITER_LINEAR",
-        "VLLM_ROCM_USE_AITER_MOE",
-        "VLLM_ROCM_USE_AITER_RMSNORM",
-        "VLLM_ROCM_USE_AITER_MLA",
-        "VLLM_ROCM_USE_AITER_MHA",
-        "VLLM_ROCM_USE_AITER_FP8BMM",
-        "VLLM_ROCM_USE_SKINNY_GEMM",
-        "VLLM_ROCM_FP8_PADDING",
-        "VLLM_ROCM_MOE_PADDING",
-        "VLLM_ROCM_CUSTOM_PAGED_ATTN",
-        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
-        "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16",
-        "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB",
-        "VLLM_ROCM_FP8_MFMA_PAGE_ATTN",
-    ]
-    for key in environment_variables_to_hash:
-        # if this goes out of sync with environment_variables,
-        # it's not a user error, it's a bug
-        assert key in environment_variables, \
-            "Please update environment_variables_to_hash in envs.py"
-
-    factors = [
-        environment_variables[key]() for key in environment_variables_to_hash
-    ]
-
-    hash_str = hashlib.md5(str(factors).encode(),
-                           usedforsecurity=False).hexdigest()
-
-    return hash_str
+    # Local import to avoid any import-cycle surprises at module import time.
+    from vllm.config.utils import hash_factors
+    return hash_factors(compile_factors())
