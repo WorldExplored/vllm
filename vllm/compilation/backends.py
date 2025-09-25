@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import dataclasses
 import hashlib
 import json
-import dataclasses
 import os
 import pprint
 import time
@@ -478,6 +478,10 @@ class VllmBackend:
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
         vllm_config = self.vllm_config
+        # Compute env factors and hash once and reuse throughout this call.
+        from vllm.config.utils import hash_factors as _hash_factors
+        env_factors = envs.compile_factors()
+        env_hash = _hash_factors(env_factors)
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
             # that affects the compilation. if none of the factors change,
@@ -487,8 +491,6 @@ class VllmBackend:
             factors = []
             # 0. factors come from the env, for example, The values of
             # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            from vllm.config.utils import hash_factors
-            env_hash = hash_factors(envs.compile_factors())
             factors.append(env_hash)
 
             # 1. factors come from the vllm_config (it mainly summarizes how the
@@ -512,8 +514,8 @@ class VllmBackend:
                     continue
                 with open(filepath) as f:
                     hash_content.append(f.read())
-            code_hash = hashlib.sha256("\n".join(hash_content).encode()
-                                    ).hexdigest()
+            code_hash = hashlib.sha256(
+                "\n".join(hash_content).encode()).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -552,20 +554,12 @@ class VllmBackend:
         self.compiler_manager.initialize_cache(local_cache_dir, disable_cache,
                                                self.prefix)
 
-        # Compute and persist compile factors and cache key components once.
-        try:
-            env_factors = envs.compile_factors()
-        except Exception:
-            env_factors = {}
-
         try:
             vllm_config_hash = vllm_config.compute_hash()
         except Exception:
             vllm_config_hash = "<unavailable>"
 
         # Derive hashes for logging and cache key.
-        from vllm.config.utils import hash_factors as _hash_factors
-        env_hash = _hash_factors(envs.compile_factors())
         config_hash = vllm_config_hash if vllm_config_hash != "<unavailable>" \
             else vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
@@ -582,10 +576,11 @@ class VllmBackend:
                     hash_content.append(f.read())
             except Exception:
                 continue
-        code_hash = hashlib.sha256("\n".join(hash_content).encode()).hexdigest()
+        code_hash = hashlib.sha256(
+            "\n".join(hash_content).encode()).hexdigest()
         summary_hash_key = hashlib.sha256(
-            str([env_hash, config_hash, code_hash, compiler_hash]).encode()
-        ).hexdigest()[:10]
+            str([env_hash, config_hash, code_hash,
+                 compiler_hash]).encode()).hexdigest()[:10]
 
         logger.info(
             "torch.compile cache factors: env=%s cfg=%s comp=%s dir=%s",
@@ -594,10 +589,16 @@ class VllmBackend:
             compiler_hash,
             local_cache_dir,
         )
-        logger.debug("code hash=%s summary_key=%s", code_hash, summary_hash_key)
+        logger.debug("code hash=%s summary_key=%s", code_hash,
+                     summary_hash_key)
 
-        # Persist only hash-relevant factors for post-run inspection.
+        # Persist and log only hash-relevant factors together.
         try:
+            logger.debug(
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                pprint.pformat(env_factors, width=120),
+                config_hash,
+            )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             with open(meta_path, "w") as f:
                 json.dump(
@@ -613,12 +614,8 @@ class VllmBackend:
                     sort_keys=True,
                 )
         except Exception:
+            # Best-effort only; metadata write failures are non-fatal.
             pass
-        logger.debug(
-            "Compile env factors (raw):\n%s\nVllm config hash: %s",
-            pprint.pformat(env_factors, width=120),
-            config_hash,
-        )
 
         # when dynamo calls the backend, it means the bytecode
         # transform and analysis are done
