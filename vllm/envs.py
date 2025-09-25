@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     VLLM_XLA_USE_SPMD: bool = False
     VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
+    VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
     VLLM_VIDEO_FETCH_TIMEOUT: int = 30
     VLLM_AUDIO_FETCH_TIMEOUT: int = 10
@@ -142,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput",
@@ -154,7 +156,8 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: Literal["naive", "pplx",
                                   "deepep_high_throughput",
                                   "deepep_low_latency",
-                                  "allgather_reducescatter"] = \
+                                  "allgather_reducescatter",
+                                  "flashinfer_all2allv"] = \
                                   "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
@@ -197,6 +200,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
+    VLLM_USE_FBGEMM: bool = False
 
 
 def get_default_cache_root():
@@ -698,6 +702,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
             os.path.join(get_default_cache_root(), "vllm", "assets"),
         )),
 
+    # If the env var is set, we will clean model file in
+    # this path $VLLM_ASSETS_CACHE/model_streamer/$model_name
+    "VLLM_ASSETS_CACHE_MODEL_CLEAN":
+    lambda: bool(int(os.getenv("VLLM_ASSETS_CACHE_MODEL_CLEAN", "0"))),
+
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
     "VLLM_IMAGE_FETCH_TIMEOUT":
@@ -1138,6 +1147,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
+    "VLLM_USE_FLASHINFER_MOE_FP16":
+    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))),
+
+    # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
 
@@ -1202,12 +1215,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
+    # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
     "VLLM_ALL2ALL_BACKEND":
     env_with_choices("VLLM_ALL2ALL_BACKEND", "allgather_reducescatter",
                      ["naive", "pplx",
                      "deepep_high_throughput",
                      "deepep_low_latency",
-                     "allgather_reducescatter"]),
+                     "allgather_reducescatter",
+                     "flashinfer_all2allv"]),
 
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
@@ -1437,7 +1452,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH":
     lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
-
+    # Flag to enable FBGemm kernels on model execution
+    "VLLM_USE_FBGEMM": lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1478,150 +1494,13 @@ def compile_factors() -> dict[str, object]:
     """
 
     ignored_factors: set[str] = {
-    "VLLM_TARGET_DEVICE",
-    "VLLM_MAIN_CUDA_VERSION",
-    "MAX_JOBS",
-    "NVCC_THREADS",
-    "VLLM_USE_PRECOMPILED",
-    "VLLM_DOCKER_BUILD_CONTEXT",
-    "VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL",
-    "CMAKE_BUILD_TYPE",
-    "VERBOSE",
-    "VLLM_CONFIG_ROOT",
-    "VLLM_CACHE_ROOT",
-    "VLLM_HOST_IP",
-    "VLLM_PORT",
-    "VLLM_RPC_BASE_PATH",
-    "VLLM_USE_MODELSCOPE",
-    "VLLM_RINGBUFFER_WARNING_INTERVAL",
-    "CUDA_HOME",
-    "VLLM_NCCL_SO_PATH",
-    "LD_LIBRARY_PATH",
-    "VLLM_FLASH_ATTN_VERSION",
-    "VLLM_PATTERN_MATCH_DEBUG",
-    "LOCAL_RANK",
-    "CUDA_VISIBLE_DEVICES",
-    "VLLM_ENGINE_ITERATION_TIMEOUT_S",
-    "VLLM_API_KEY",
-    "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
-    "S3_ACCESS_KEY_ID",
-    "S3_SECRET_ACCESS_KEY",
-    "S3_ENDPOINT_URL",
-    "VLLM_USAGE_STATS_SERVER",
-    "VLLM_NO_USAGE_STATS",
-    "VLLM_DISABLE_FLASHINFER_PREFILL",
-    "VLLM_DO_NOT_TRACK",
-    "VLLM_USAGE_SOURCE",
-    "VLLM_CONFIGURE_LOGGING",
-    "VLLM_LOGGING_CONFIG_PATH",
-    "VLLM_LOGGING_LEVEL",
-    "VLLM_LOGGING_STREAM",
-    "VLLM_LOGGING_PREFIX",
-    "VLLM_LOGITS_PROCESSOR_THREADS",
-    "VLLM_LOG_STATS_INTERVAL",
-    "VLLM_TRACE_FUNCTION",
-    "VLLM_CPU_KVCACHE_SPACE",
-    "VLLM_CPU_OMP_THREADS_BIND",
-    "VLLM_CPU_NUM_OF_RESERVED_CPU",
-    "VLLM_CPU_MOE_PREPACK",
-    "VLLM_CPU_SGL_KERNEL",
-    "VLLM_USE_RAY_SPMD_WORKER",
-    "VLLM_USE_RAY_COMPILED_DAG",
-    "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE",
-    "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM",
-    "VLLM_USE_RAY_WRAPPED_PP_COMM",
-    "VLLM_WORKER_MULTIPROC_METHOD",
-    "VLLM_ASSETS_CACHE",
-    "VLLM_IMAGE_FETCH_TIMEOUT",
-    "VLLM_VIDEO_FETCH_TIMEOUT",
-    "VLLM_AUDIO_FETCH_TIMEOUT",
-    "VLLM_MEDIA_LOADING_THREAD_COUNT",
-    "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
-    "VLLM_VIDEO_LOADER_BACKEND",
-    "VLLM_MM_INPUT_CACHE_GIB",
-    "VLLM_XLA_CACHE_PATH",
-    "VLLM_XLA_CHECK_RECOMPILATION",
-    "VLLM_XLA_USE_SPMD",
-    "VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING",
-    "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
-    "VLLM_ALLOW_LONG_MAX_MODEL_LEN",
-    "VLLM_TEST_FORCE_FP8_MARLIN",
-    "VLLM_TEST_FORCE_LOAD_FORMAT",
-    "VLLM_RPC_TIMEOUT",
-    "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
-    "VLLM_PLUGINS",
-    "VLLM_LORA_RESOLVER_CACHE_DIR",
-    "VLLM_TORCH_PROFILER_DIR",
-    "VLLM_TORCH_PROFILER_RECORD_SHAPES",
-    "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY",
-    "VLLM_TORCH_PROFILER_WITH_STACK",
-    "VLLM_TORCH_PROFILER_WITH_FLOPS",
-    "VLLM_ALLOW_RUNTIME_LORA_UPDATING",
-    "VLLM_SKIP_P2P_CHECK",
-    "VLLM_DISABLE_NCCL_FOR_DP_SYNCHRONIZATION",
-    "VLLM_USE_V1",
-    "Q_SCALE_CONSTANT",
-    "K_SCALE_CONSTANT",
-    "V_SCALE_CONSTANT",
-    "VLLM_ENABLE_V1_MULTIPROCESSING",
-    "VLLM_LOG_BATCHSIZE_INTERVAL",
-    "VLLM_DISABLE_COMPILE_CACHE",
-    "VLLM_SERVER_DEV_MODE",
-    "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
-    "VLLM_RAY_PER_WORKER_GPUS",
-    "VLLM_RAY_BUNDLE_INDICES",
-    "VLLM_CUDART_SO_PATH",
-    "VLLM_DP_RANK_LOCAL",
-    "VLLM_DP_MASTER_IP",
-    "VLLM_DP_MASTER_PORT",
-    "VLLM_MOE_DP_CHUNK_SIZE",
-    "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
-    "VLLM_CI_USE_S3",
-    "VLLM_MODEL_REDIRECT_PATH",
-    "VLLM_MARLIN_USE_ATOMIC_ADD",
-    "VLLM_MXFP4_USE_MARLIN",
-    "VLLM_V0_USE_OUTLINES_CACHE",
-    "VLLM_V1_USE_OUTLINES_CACHE",
-    "VLLM_TPU_BUCKET_PADDING_GAP",
-    "VLLM_TPU_MOST_MODEL_LEN",
-    "VLLM_TPU_USING_PATHWAYS",
-    "VLLM_SKIP_DEEP_GEMM_WARMUP",
-    "VLLM_XGRAMMAR_CACHE_MB",
-    "VLLM_MSGPACK_ZERO_COPY_THRESHOLD",
-    "VLLM_ALLOW_INSECURE_SERIALIZATION",
-    "VLLM_NIXL_SIDE_CHANNEL_HOST",
-    "VLLM_NIXL_SIDE_CHANNEL_PORT",
-    "VLLM_ALL2ALL_BACKEND",
-    "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE",
-    "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB",
-    "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
-    "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS",
-    "VLLM_SLEEP_WHEN_IDLE",
-    "VLLM_MQ_MAX_CHUNK_BYTES_MB",
-    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
-    "VLLM_KV_CACHE_LAYOUT",
-    "VLLM_COMPUTE_NANS_IN_LOGITS",
-    "VLLM_USE_NVFP4_CT_EMULATIONS",
-    "VLLM_NIXL_ABORT_REQUEST_TIMEOUT",
-    "VLLM_HAS_FLASHINFER_CUBIN",
-    "VLLM_ENABLE_CUDAGRAPH_GC",
-    "VLLM_DISABLE_PAD_FOR_CUDAGRAPH",
-    "VLLM_LOOPBACK_IP",
-    "VLLM_PROCESS_NAME_PREFIX",
-    "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE",
-    "VLLM_ENABLE_RESPONSES_API_STORE",
-    "VLLM_ALLREDUCE_USE_SYMM_MEM",
-    "VLLM_TUNED_CONFIG_FOLDER",
-    "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS",
-    "VLLM_CUSTOM_SCOPES_FOR_PROFILING",
-    "VLLM_NVTX_SCOPES_FOR_PROFILING",
-    "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES",
-    "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
-    "VLLM_DEEPEP_BUFFER_SIZE_MB",
-    "VLLM_DBO_COMM_SMS",
-    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-    "VLLM_USE_NCCL_SYMM_MEM",
-    "VLLM_NCCL_INCLUDE_PATH"}
+        "MAX_JOBS", "VLLM_RPC_BASE_PATH", "VLLM_USE_MODELSCOPE",
+        "VLLM_RINGBUFFER_WARNING_INTERVAL", "LD_LIBRARY_PATH",
+        "VLLM_PATTERN_MATCH_DEBUG", "VLLM_SERVER_DEV_MODE",
+        "VLLM_DP_MASTER_IP", "VLLM_DP_MASTER_PORT",
+        "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "VLLM_CI_USE_S3",
+        "VLLM_MODEL_REDIRECT_PATH"
+    }
 
     from vllm.config.utils import normalize_value
 
@@ -1629,15 +1508,9 @@ def compile_factors() -> dict[str, object]:
     for factor, getter in environment_variables.items():
         if factor in ignored_factors:
             continue
-        try:
-            raw = getter()
-        except Exception:
-            # Do not drop the factor; mark retrieval failure deterministically.
-            factors[factor] = "<error:unavailable>"
-            continue
-        try:
-            factors[factor] = normalize_value(raw)
-        except Exception:
-            # Preserve the factor with a stable placeholder to avoid under-hashing.
-            factors[factor] = f"<unserializable:{type(raw).__name__}>"
+        
+        raw = getter()
+
+        factors[factor] = normalize_value(raw)
+        
     return factors
