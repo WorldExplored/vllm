@@ -1492,23 +1492,3 @@ def compile_factors() -> dict[str, object]:
             # Skip values we cannot canonicalize deterministically.
             continue
     return factors
-
-
-def compute_hash() -> str:
-    """
-    WARNING: Whenever a new key is added to this environment
-    variables, ensure that it is included in the factors list if
-    it affects the computation graph. For example, different values
-    of VLLM_PP_LAYER_PARTITION will generate different computation
-    graphs, so it is included in the factors list. The env vars that
-    affect the choice of different kernels or attention backends should
-    also be included in the factors list.
-
-    Opt-out env hashing for torch.compile cache keys:
-    default-include all known vLLM environment variables, exclude a
-    tiny set that clearly do not affect the compiled graph.
-    """
-
-    # Local import to avoid any import-cycle surprises at module import time.
-    from vllm.config.utils import hash_factors
-    return hash_factors(compile_factors())
