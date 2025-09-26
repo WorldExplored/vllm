@@ -666,7 +666,7 @@ class VllmBackend:
                 static_tensor = self.input_buffers[i][:runtime_shape]
 
                 # copy the tensor to the static buffer
-                static_tensor.copy_(runtime_tensor)
+                static_tensor.copy_(runtime_tensor) 
 
                 # replace the tensor in the list_args to the static buffer
                 list_args[index] = static_tensor
