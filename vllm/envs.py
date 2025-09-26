@@ -1514,3 +1514,4 @@ def compile_factors() -> dict[str, object]:
         factors[factor] = normalize_value(raw)
         
     return factors
+ 
