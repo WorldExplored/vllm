@@ -324,6 +324,35 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
+    # Verify EPLB-related flags are consistent across all DP ranks.
+    @staticmethod
+    def verify_eplb_compat(dp_group: ProcessGroup, pc: "ParallelConfig") -> None:
+        """
+        Fail fast if EPLB-critical settings differ across DP ranks.
+
+        Currently validates:
+          - enable_eplb
+          - eplb_config.log_balancedness (covers deprecated --eplb-log-balancedness)
+        """
+        local = torch.tensor([
+            1 if pc.enable_eplb else 0,
+            1 if getattr(pc.eplb_config, "log_balancedness", False) else 0,
+        ], device="cpu", dtype=torch.int32)
+
+        max_v = local.clone()
+        min_v = local.clone()
+        torch.distributed.all_reduce(max_v, op=ReduceOp.MAX, group=dp_group)
+        torch.distributed.all_reduce(min_v, op=ReduceOp.MIN, group=dp_group)
+
+        if not torch.equal(max_v, min_v):
+            raise RuntimeError(
+                "Inconsistent EPLB settings across data-parallel ranks. "
+                f"Local: enable_eplb={bool(local[0].item())}, "
+                f"eplb_log_balancedness={bool(local[1].item())}. "
+                "Ensure all ranks use the same values for --enable-eplb and "
+                "--eplb-log-balancedness (or set eplb_config.log_balancedness consistently)."
+            )
+
     def compute_hash(self):
         """
         Provide a hash that uniquely identifies all the configs
