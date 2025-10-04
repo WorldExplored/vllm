@@ -992,6 +992,11 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
 
+        # Verify DP-wide EPLB compatibility early to avoid hangs due to
+        # mismatched collective/logging behavior across ranks.
+        ParallelConfig.verify_eplb_compat(self.dp_group,
+                                          vllm_config.parallel_config)
+
     def shutdown(self):
         super().shutdown()
         if dp_group := getattr(self, "dp_group", None):
