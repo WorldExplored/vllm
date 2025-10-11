@@ -8,19 +8,6 @@ from vllm.platforms import current_platform
 DTYPES = (torch.float16, torch.bfloat16, torch.float32)
 
 
-def _as_tuple(value):
-    return value if isinstance(value, tuple) else (value,)
-
-
-def _clone_like(value):
-    if isinstance(value, torch.Tensor):
-        return value.clone()
-    if isinstance(value, (tuple, list)):
-        value_type = type(value)
-        return value_type(_clone_like(item) for item in value)
-    return value
-
-
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize(
@@ -40,6 +27,7 @@ def test_rotary_embedding_forward_cuda_matches_native(
     rotary_dim: int,
     with_key: bool,
 ) -> None:
+    """Validate that CUDA and native rotary embeddings match numerically."""
     torch.manual_seed(0)
 
     device = torch.device("cuda", 0)
@@ -64,19 +52,21 @@ def test_rotary_embedding_forward_cuda_matches_native(
     )
     key = torch.randn_like(query) if with_key else None
 
-    native_args = (
+    native_out = op.forward_native(
         positions,
-        _clone_like(query),
-        _clone_like(key),
+        query.clone(),
+        key.clone() if key is not None else None,
     )
-    cuda_args = (
+    cuda_out = op.forward_cuda(
         positions,
-        _clone_like(query),
-        _clone_like(key),
+        query.clone(),
+        key.clone() if key is not None else None,
     )
 
-    native_out = _as_tuple(op.forward_native(*native_args))
-    cuda_out = _as_tuple(op.forward_cuda(*cuda_args))
+    if not isinstance(native_out, tuple):
+        native_out = (native_out,)
+    if not isinstance(cuda_out, tuple):
+        cuda_out = (cuda_out,)
 
     assert len(native_out) == len(cuda_out)
 
