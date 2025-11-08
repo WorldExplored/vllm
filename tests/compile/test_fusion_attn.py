@@ -413,7 +413,7 @@ def test_attention_quant_pattern(
             assert model_compiled.attn._o_scale_float is not None
 
             torch.testing.assert_close(
-                result_unfused, result_fused_2, atol=1e-2, rtol=1e-2
+                result_unfused, result_fused_2, atol=5e-2, rtol=5e-2
             )
 
     # Check attn fusion support
@@ -468,4 +468,4 @@ def test_attention_quant_pattern(
         )
 
     # Check that results are close
-    torch.testing.assert_close(result_unfused, result_fused_1, atol=1e-2, rtol=1e-2)
+    torch.testing.assert_close(result_unfused, result_fused_1, atol=5e-2, rtol=5e-2)

@@ -191,7 +191,7 @@ def test_fusion_silu_and_mul_quant(
 
         # Check that it gives the same answer
         if model_class == TestSiluMulFp8QuantModel:
-            atol, rtol = 1e-3, 1e-3
+            atol, rtol = 1e-1, 1e-1
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
 

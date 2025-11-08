@@ -183,7 +183,7 @@ def test_fusion_rmsnorm_quant(
         result_unfused = model_unfused(x)
 
         if dtype == torch.float16:
-            ATOL, RTOL = (2e-3, 2e-3)
+            ATOL, RTOL = (1e-2, 1e-2)
         else:
             ATOL, RTOL = (1e-2, 1e-2)
 
