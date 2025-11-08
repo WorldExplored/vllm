@@ -455,7 +455,8 @@ steps:
     - vllm/
     - tests/compile
   commands:
-    - pytest -v -s -m "not distributed" -k "not piecewise and not full_graph and not fusions_e2e" tests/compile
+  # Run all compile tests except heavy suites; basic opt-out for clarity
+  - pytest -v -s -m "not distributed" -k "not (piecewise or full_graph or fusions_e2e)" tests/compile
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
